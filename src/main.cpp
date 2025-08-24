@@ -59,6 +59,13 @@ static void rstrip_cr(std::string& s) {
     if (!s.empty() && s.back() == '\r') s.pop_back();
 }
 
+// Ignore indentation helper: strip leading spaces/tabs
+static inline std::string strip_indent(const std::string& in) {
+    size_t i = 0;
+    while (i < in.size() && (in[i] == ' ' || in[i] == '\t')) ++i;
+    return in.substr(i);
+}
+
 // YAML escaping for double-quoted scalars
 static std::string yaml_escape(const std::string& in) {
     std::string out;
@@ -239,7 +246,7 @@ struct Hit {
 };
 
 struct DuplicateBlock {
-    std::vector<std::string> lines; // the block lines
+    std::vector<std::string> lines; // the block lines (from first occurrence)
     std::vector<Hit> hits;
 };
 
@@ -273,14 +280,34 @@ static std::string join_lines(const std::vector<std::string>& v, size_t i, size_
     return oss.str();
 }
 
+// Join with optional indentation stripping (for keys)
+static std::string join_lines_norm(const std::vector<std::string>& v, size_t i, size_t j, bool ignore_indent) {
+    std::ostringstream oss;
+    for (size_t k = i; k < j; ++k) {
+        if (k > i) oss << '\n';
+        if (ignore_indent) oss << strip_indent(v[k]);
+        else oss << v[k];
+    }
+    return oss.str();
+}
+
 struct Occurrence {
     int file_index;
     size_t start; // 0-based line index
 };
 
 static DuplicateBlock build_maximal_block(const std::vector<FileData>& files,
-                                          const std::vector<Occurrence>& occs,
-                                          size_t seed_len) {
+                                          const std::vector<Occurrence>& occs_in,
+                                          size_t seed_len,
+                                          bool ignore_indent) {
+    // Work on a local copy as we adjust start when extending backward.
+    std::vector<Occurrence> occs = occs_in;
+
+    auto equal_line = [ignore_indent](const std::string& a, const std::string& b) {
+        if (!ignore_indent) return a == b;
+        return strip_indent(a) == strip_indent(b);
+    };
+
     // Extend backward as long as all occurrences have same previous line
     bool can = true;
     while (can) {
@@ -291,12 +318,10 @@ static DuplicateBlock build_maximal_block(const std::vector<FileData>& files,
         const std::string& ref = files[occs[0].file_index].lines[occs[0].start - 1];
         for (size_t i = 1; i < occs.size(); ++i) {
             const auto& fd = files[occs[i].file_index];
-            if (fd.lines[occs[i].start - 1] != ref) { can = false; break; }
+            if (!equal_line(fd.lines[occs[i].start - 1], ref)) { can = false; break; }
         }
         if (can) {
-            for (auto& oc : const_cast<std::vector<Occurrence>&>(occs)) {
-                oc.start -= 1;
-            }
+            for (auto& oc : occs) oc.start -= 1;
         }
     }
 
@@ -311,7 +336,7 @@ static DuplicateBlock build_maximal_block(const std::vector<FileData>& files,
         for (size_t i = 1; i < occs.size(); ++i) {
             size_t next_idx = occs[i].start + length;
             const auto& fi = files[occs[i].file_index];
-            if (next_idx >= fi.lines.size() || fi.lines[next_idx] != ref) {
+            if (next_idx >= fi.lines.size() || !equal_line(fi.lines[next_idx], ref)) {
                 all_ok = false; break;
             }
         }
@@ -319,7 +344,7 @@ static DuplicateBlock build_maximal_block(const std::vector<FileData>& files,
         length += 1;
     }
 
-    // Build block
+    // Build block using lines from the first file's occurrence (original indentation)
     DuplicateBlock block;
     block.lines = std::vector<std::string>(
         files[occs[0].file_index].lines.begin() + static_cast<std::ptrdiff_t>(occs[0].start),
@@ -337,7 +362,7 @@ static DuplicateBlock build_maximal_block(const std::vector<FileData>& files,
 }
 
 static std::vector<DuplicateBlock>
-find_repeated_blocks(const std::vector<fs::path>& files_paths, size_t min_lines) {
+find_repeated_blocks(const std::vector<fs::path>& files_paths, size_t min_lines, bool ignore_indent) {
     // Load all files
     std::vector<FileData> files;
     files.reserve(files_paths.size());
@@ -357,7 +382,7 @@ find_repeated_blocks(const std::vector<fs::path>& files_paths, size_t min_lines)
         const auto& f = files[idx];
         if (f.lines.size() < min_lines) continue;
         for (size_t i = 0; i + min_lines <= f.lines.size(); ++i) {
-            std::string key = join_lines(f.lines, i, i + min_lines);
+            std::string key = join_lines_norm(f.lines, i, i + min_lines, ignore_indent);
             seeds[key].push_back({ idx, i });
         }
     }
@@ -367,20 +392,21 @@ find_repeated_blocks(const std::vector<fs::path>& files_paths, size_t min_lines)
     dlog("seed windows: " + std::to_string(seeds.size()) +
          " | candidate seeds (>=2 hits): " + std::to_string(candidate_seeds));
 
-    // Aggregate maximal blocks keyed by full content to dedupe/merge hits
+    // Aggregate maximal blocks keyed by (possibly normalized) content to dedupe/merge hits
     struct Agg {
         std::vector<std::string> lines;
         std::unordered_set<std::string> hit_keys;
         std::vector<Hit> hits;
     };
-    std::unordered_map<std::string, Agg> by_content; // full content string -> Agg
+    std::unordered_map<std::string, Agg> by_content; // content key -> Agg
 
     size_t groups_built = 0;
     for (auto& [seed, occs] : seeds) {
         if (occs.size() < 2) continue;
-        DuplicateBlock block = build_maximal_block(files, occs, min_lines);
-        std::string content = join_lines(block.lines, 0, block.lines.size());
-        auto& agg = by_content[content];
+        DuplicateBlock block = build_maximal_block(files, occs, min_lines, ignore_indent);
+        // Use normalized content as key if ignoring indentation
+        std::string content_key = join_lines_norm(block.lines, 0, block.lines.size(), ignore_indent);
+        auto& agg = by_content[content_key];
         if (agg.lines.empty()) agg.lines = block.lines;
 
         for (const auto& h : block.hits) {
@@ -451,8 +477,10 @@ static void print_yaml(const std::vector<DuplicateBlock>& blocks) {
 // ------------------------------- Main --------------------------------
 
 static void print_usage_and_exit(const char* argv0) {
-    std::cerr << "Usage: " << argv0 << " [--debug] --min-lines N <glob> [<glob>...]\n";
-    std::cerr << "Example: " << argv0 << " --min-lines 9 \"./foo/**/*.cpp\" \"*.c\"\n";
+    std::cerr << "Usage: " << argv0 << " [--debug] [--ignore-indentation] "
+              << "--min-lines N <glob> [<glob>...]\n";
+    std::cerr << "Example: " << argv0 << " --ignore-indentation --min-lines 9 "
+              << "\"./foo/**/*.cpp\" \"*.c\"\n";
     std::exit(2);
 }
 
@@ -461,6 +489,7 @@ int main(int argc, char** argv) {
         print_usage_and_exit(argv[0]);
     }
     size_t min_lines = 0;
+    bool ignore_indent = false;
     std::vector<std::string> patterns;
 
     for (int i = 1; i < argc; ++i) {
@@ -480,6 +509,8 @@ int main(int argc, char** argv) {
             }
         } else if (arg == "--debug") {
             g_debug = true;
+        } else if (arg == "--ignore-indentation") {
+            ignore_indent = true;
         } else {
             patterns.push_back(arg);
         }
@@ -490,6 +521,7 @@ int main(int argc, char** argv) {
     }
 
     dlog("min_lines=" + std::to_string(min_lines));
+    dlog(std::string("ignore_indentation=") + (ignore_indent ? "true" : "false"));
     {
         std::ostringstream oss;
         oss << "patterns:";
@@ -508,7 +540,7 @@ int main(int argc, char** argv) {
     }
 
     // Find duplicates
-    std::vector<DuplicateBlock> blocks = find_repeated_blocks(files, min_lines);
+    std::vector<DuplicateBlock> blocks = find_repeated_blocks(files, min_lines, ignore_indent);
 
     // Sort by size/length (lines desc), then by occurrences desc, then by content
     std::sort(blocks.begin(), blocks.end(), [](const DuplicateBlock& a, const DuplicateBlock& b){

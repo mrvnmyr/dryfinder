@@ -27,6 +27,9 @@ Options:
 
 - ``--min-lines N`` (required): Minimum number of lines in a block to be
   considered a duplicate seed.
+- ``--ignore-indentation`` (optional): Ignore leading spaces and tabs when
+  matching/merging blocks. (Output still shows the original indentation from
+  the first occurrence.)
 - ``--debug`` (optional): Print diagnostic information to **stderr**.
 - Globs: One or more glob patterns. Supports ``*``, ``?``, and ``**``
   (recursive). Bracket ``[]`` classes are not supported. Patterns are
@@ -61,6 +64,8 @@ Notes & Limitations
 
 - Matching is **exact line-by-line** (after normalizing CRLF to LF and
   removing a UTF-8 BOM if present on the first line).
+- ``--ignore-indentation`` treats lines as equal if their leading spaces/tabs
+  differ; useful for code where blocks are re-indented.
 - Seeds are found using ``--min-lines``; each seed group is **maximally
   extended** both backward and forward as long as *all* occurrences in
   that group keep matching. Identical maximal blocks discovered via
