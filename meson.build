@@ -3,10 +3,18 @@ project('dryfinder', 'cpp',
 )
 
 cpp = meson.get_compiler('cpp')
+message('Configuring for compiler: ' + cpp.get_id())
+
 if cpp.get_id() == 'msvc'
-  add_project_arguments('/W4', '/permissive-', language: 'cpp')
+  # Rely on Meson's warning_level=3 (maps to /W3). Keep permissive- for
+  # stricter standard conformance.
+  add_project_arguments('/permissive-', language: 'cpp')
+  message('MSVC: using warning_level=3 (no explicit /W4); added /permissive-')
 else
-  add_project_arguments('-Wall', '-Wextra', '-Wpedantic', language: 'cpp')
+  # For GCC/Clang, warning_level=3 already maps to -Wall -Wextra. Keep only
+  # -Wpedantic explicitly for additional pedantic checks.
+  add_project_arguments('-Wpedantic', language: 'cpp')
+  message('Non-MSVC: using warning_level=3 (+ -Wpedantic)')
 endif
 
 executable('dryfinder',
