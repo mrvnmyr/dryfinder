@@ -309,7 +309,8 @@ static std::vector<std::string> read_lines_normalized(const fs::path& p) {
 }
 
 // Join lines [i, j) with '\n'
-static std::string join_lines(const std::vector<std::string>& v, size_t i, size_t j) {
+[[maybe_unused]] static std::string
+join_lines(const std::vector<std::string>& v, size_t i, size_t j) {
     std::ostringstream oss;
     for (size_t k = i; k < j; ++k) {
         if (k > i) oss << '\n';
@@ -438,6 +439,8 @@ find_repeated_blocks(const std::vector<fs::path>& files_paths, size_t min_lines,
     for (const auto& kv : seeds) if (kv.second.size() >= 2) ++candidate_seeds;
     dlog("seed windows: " + std::to_string(seeds.size()) +
          " | candidate seeds (>=2 hits): " + std::to_string(candidate_seeds));
+    dlog(std::string("building maximal groups with min_lines=") + std::to_string(min_lines) +
+         (ignore_indent ? " [ignore-indentation]" : ""));
 
     // Aggregate maximal blocks keyed by (possibly normalized) content to dedupe/merge hits
     struct Agg {
@@ -519,6 +522,7 @@ static void print_yaml(const std::vector<DuplicateBlock>& blocks) {
             std::cout << "      " << line << "\n";
         }
     }
+    dlog("yaml emission complete for " + std::to_string(blocks.size()) + " block(s)");
 }
 
 // ------------------------------- Main --------------------------------
@@ -600,5 +604,6 @@ int main(int argc, char** argv) {
 
     dlog("blocks after sort: " + std::to_string(blocks.size()));
     print_yaml(blocks);
+    dlog("done");
     return 0;
 }
