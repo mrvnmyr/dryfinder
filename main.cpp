@@ -92,6 +92,39 @@ static std::string yaml_escape(const std::string& in) {
     return out;
 }
 
+// Quick binary-file sniffing: treat files with NUL bytes or a high ratio
+// of non-text control characters in the first few KB as binary and skip.
+static bool is_probably_binary(const fs::path& p, size_t sniff_max = 4096) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return false; // if we can't open, don't classify as binary here
+    std::vector<unsigned char> buf(sniff_max);
+    in.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+    std::streamsize n = in.gcount();
+    if (n <= 0) return false; // empty files are not considered binary
+    size_t nontext = 0;
+    for (std::streamsize i = 0; i < n; ++i) {
+        unsigned char c = buf[static_cast<size_t>(i)];
+        if (c == 0) {
+            dlog(std::string("binary sniff (NUL) -> ") + to_generic_string(p));
+            return true;
+        }
+        // allow common whitespace: \t(0x09), \n(0x0A), \r(0x0D)
+        if (c < 0x09 || (c > 0x0D && c < 0x20)) {
+            ++nontext;
+        }
+    }
+    bool isbin = (static_cast<double>(nontext) / static_cast<double>(n)) > 0.30;
+    if (g_debug) {
+        std::ostringstream oss;
+        oss << "binary sniff stats: " << to_generic_string(p)
+            << " bytes=" << n << " ctrl=" << nontext
+            << " ratio=" << (static_cast<double>(nontext) / static_cast<double>(n))
+            << " -> " << (isbin ? "binary" : "text");
+        dlog(oss.str());
+    }
+    return isbin;
+}
+
 // ----------------------------- Glob Engine ----------------------------
 // Minimal glob-to-regex supporting *, ?, ** (recursive)
 // We determine a base directory (prefix before first glob char),
@@ -186,6 +219,10 @@ static CompiledPattern compile_pattern(const std::string& pattern_raw) {
     if (suffix.empty()) suffix = "**"; // match everything under base
 
     std::string re_str = to_regex_from_glob_suffix(suffix);
+    if (g_debug) {
+        dlog(std::string("compile_pattern: base=") + base_generic +
+             " suffix=" + suffix + " regex=" + re_str);
+    }
     std::regex re(re_str, std::regex::ECMAScript);
     return { base, re };
 }
@@ -229,6 +266,7 @@ static std::vector<fs::path> expand_globs(const std::vector<std::string>& patter
         }
         dlog("  matched files: " + std::to_string(added));
     }
+    dlog("total unique files matched across all globs: " + std::to_string(results.size()));
     return results;
 }
 
@@ -363,10 +401,16 @@ static DuplicateBlock build_maximal_block(const std::vector<FileData>& files,
 
 static std::vector<DuplicateBlock>
 find_repeated_blocks(const std::vector<fs::path>& files_paths, size_t min_lines, bool ignore_indent) {
-    // Load all files
+    // Load all files, skipping binaries
     std::vector<FileData> files;
     files.reserve(files_paths.size());
+    size_t skipped_binary = 0;
     for (const auto& p : files_paths) {
+        if (is_probably_binary(p)) {
+            ++skipped_binary;
+            dlog(std::string("skip binary file: ") + to_generic_string(p));
+            continue;
+        }
         FileData fd;
         fd.path = p;
         fd.lines = read_lines_normalized(p);
@@ -374,6 +418,9 @@ find_repeated_blocks(const std::vector<fs::path>& files_paths, size_t min_lines,
     }
 
     dlog("total files loaded: " + std::to_string(files.size()));
+    if (skipped_binary > 0) {
+        dlog("binary files skipped: " + std::to_string(skipped_binary));
+    }
 
     // Map seed-string -> occurrences
     // seed-string is the concatenation of min_lines lines with '\n'
