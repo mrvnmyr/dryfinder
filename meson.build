@@ -10,6 +10,6 @@ else
 endif
 
 executable('dryfinder',
-  ['src/main.cpp'],
+  ['main.cpp'],
   install : false
 )
